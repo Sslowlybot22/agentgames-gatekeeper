@@ -22,13 +22,24 @@ export const WITNESS_NAMES = [
 ];
 
 // Order of the 13 public signals, exactly as the platform computes them.
+// taskId is the last 36 characters of the task id with dashes stripped, which is
+// the trailing UUID. Falls back to the last 32 hex characters if the id is not in
+// that shape, so an unexpected id still produces a proof instead of an exception.
+function taskIdField(taskId) {
+  const id = String(taskId ?? "");
+  const tail = id.slice(-36).replaceAll("-", "");
+  if (/^[0-9a-fA-F]{1,32}$/.test(tail)) return "0x" + tail;
+  const hex = id.replace(/[^0-9a-fA-F]/g, "").slice(-32);
+  return hex ? "0x" + hex : "0x0";
+}
+
 export function publicInputs(task, decision) {
   const i = task.input;
   return [
     i.registered_vk, i.proof_vk, i.minimum, i.public_balance, i.expiry_block,
     i.current_block, i.recipient, i.condition_recipient, i.amount, i.max_transfer,
     decision === "APPROVE" ? 1 : 0,
-    "0x" + task.task_id.slice(-36).replaceAll("-", ""),
+    taskIdField(task.task_id),
   ].map((v) => (BigInt(v) % FIELD).toString());
 }
 
