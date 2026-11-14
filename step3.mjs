@@ -1,0 +1,11 @@
+import { createRequire } from "node:module";
+const require=createRequire(import.meta.url);
+const snarkjs=require("snarkjs");
+const N=["registeredVkHash","proofVkHash","minimum","publicBalance","expiryBlock","currentBlock","recipient","conditionRecipient","amount","maxTransfer","decision","taskId"];
+const vals=["1234","1234","1000","1460","1000","900","5678","5678","500","1000","1","999"];
+const w=Object.fromEntries(N.map((n,i)=>[n,vals[i]]));
+w.salt="777";
+console.log("start fullProve");
+const t0=Date.now();
+const r=await snarkjs.groth16.fullProve(w,"circuits/gatekeeper.wasm","circuits/gatekeeper_final.zkey");
+console.log("fullProve ms",Date.now()-t0,"signals",r.publicSignals.length);

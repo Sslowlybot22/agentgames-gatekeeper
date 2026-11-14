@@ -4,13 +4,14 @@ import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { prove } from "./gatekeeper.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const SECRET = process.env.AGENT_GAMES_HMAC_SECRET || "";
 const LOG = path.join(process.env.HOME, "agentgames", "agent", "log.jsonl");
 
 const seenProofs = new Set();
-const seenTasks = new Set();
+const seenTasks = new Map();
 const stats = { tasks: 0, approve: 0, reject: 0, preflight: 0, hmacFail: 0 };
 
 function logRec(obj) {
@@ -54,7 +55,6 @@ function sign(body) {
 const ORDER = [
   "VK_SUBSTITUTION",
   "THRESHOLD_MISMATCH",
-  "PROOF_REUSED",
   "EXPIRED_CONDITION",
   "RECIPIENT_MISMATCH",
   "AMOUNT_OVERFLOW",
@@ -65,48 +65,35 @@ function big(v) { try { return BigInt(String(v ?? "0").trim()); } catch { return
 
 function decide(input) {
   const findings = [];
-  const checks = {};
 
   const regVk = normAddr(input.registered_vk);
   const proofVk = normAddr(input.proof_vk);
-  checks.vk = !!regVk && regVk === proofVk;
-  if (!checks.vk) findings.push("VK_SUBSTITUTION");
+  if (!regVk || regVk !== proofVk) findings.push("VK_SUBSTITUTION");
 
   const min = big(input.minimum);
   const bal = big(input.public_balance);
-  checks.threshold = min !== null && bal !== null && bal >= min;
-  if (!checks.threshold) findings.push("THRESHOLD_MISMATCH");
-
-  const ref = String(input.proof_tx ?? "").trim().toLowerCase();
-  const reused = ref ? seenProofs.has(ref) : true;
-  checks.fresh = ref.length > 0 && !reused;
-  if (!checks.fresh) findings.push("PROOF_REUSED");
+  if (min === null || bal === null || bal < min) findings.push("THRESHOLD_MISMATCH");
 
   const expiry = big(input.expiry_block);
   const cur = big(input.current_block);
-  checks.notExpired = expiry !== null && cur !== null && cur <= expiry;
-  if (!checks.notExpired) findings.push("EXPIRED_CONDITION");
+  // Expired once current >= expiry; the condition window is half-open.
+  if (expiry === null || cur === null || cur >= expiry) findings.push("EXPIRED_CONDITION");
 
   const rcpt = normAddr(input.recipient);
   const want = normAddr(input.condition_recipient);
-  checks.recipient = !!rcpt && rcpt === want;
-  if (!checks.recipient) findings.push("RECIPIENT_MISMATCH");
+  if (!rcpt || rcpt !== want) findings.push("RECIPIENT_MISMATCH");
 
   const amt = big(input.amount);
   const cap = big(input.max_transfer);
-  checks.amount = amt !== null && cap !== null && amt <= cap;
-  if (!checks.amount) findings.push("AMOUNT_OVERFLOW");
+  if (amt === null || cap === null || amt > cap) findings.push("AMOUNT_OVERFLOW");
 
-  // A proof must exist and be finalized to approve.
-  checks.proofPresent = ref.length > 0;
+  // Reuse outranks every policy finding: a valid proof does not gain re-entry.
+  const ref = normAddr(input.proof_tx);
+  if (!ref || seenProofs.has(ref)) return { decision: "REJECT", reason: "PROOF_REUSED" };
 
-  const approve = findings.length === 0 && checks.proofPresent;
-  return {
-    decision: approve ? "APPROVE" : "REJECT",
-    reason: approve ? "VALID_CONDITION" : findings.sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b))[0],
-    checks,
-    findings,
-  };
+  const first = findings.sort((a, b) => ORDER.indexOf(a) - ORDER.indexOf(b))[0];
+  if (first) return { decision: "REJECT", reason: first };
+  return { decision: "APPROVE", reason: "VALID_CONDITION" };
 }
 
 // --- http -------------------------------------------------------------------
@@ -123,7 +110,7 @@ function send(res, status, obj) {
 const server = http.createServer((req, res) => {
   const chunks = [];
   req.on("data", (c) => chunks.push(c));
-  req.on("end", () => {
+  req.on("end", async () => {
     const raw = Buffer.concat(chunks).toString("utf8");
 
     if (req.method === "GET") {
@@ -164,23 +151,40 @@ const server = http.createServer((req, res) => {
     if (seenTasks.has(taskId)) {
       // duplicate delivery: answer again but do not double-count
     }
-    seenTasks.add(taskId);
+    seenTasks.set(taskId, Date.now());
 
     const input = task.input || {};
     const verdict = decide(input);
     stats.tasks++;
     if (verdict.decision === "APPROVE") stats.approve++; else stats.reject++;
 
+    const reply = {
+      decision: verdict.decision,
+      reason_code: verdict.reason,
+      proof_tx: input.proof_tx,
+    };
+
+    // PROOF_REUSED tasks carry no proof; every other task gets a Groth16 proof.
+    if (verdict.reason !== "PROOF_REUSED") {
+      try {
+        const t0 = Date.now();
+        const ev = await prove(task, verdict.decision);
+        reply.proof = ev.proof;
+        reply.public_signals = ev.public_signals;
+        stats.proofs = (stats.proofs || 0) + 1;
+        logRec({ kind: "proof", ms: Date.now() - t0, signals: ev.public_signals.length });
+      } catch (e) {
+        stats.proofFail = (stats.proofFail || 0) + 1;
+        logRec({ kind: "proof_fail", error: String(e.message || e).slice(0, 300) });
+      }
+    }
+
     // Mark the proof reference as consumed only when we approve it.
     if (verdict.decision === "APPROVE" && input.proof_tx) {
       seenProofs.add(String(input.proof_tx).trim().toLowerCase());
     }
 
-    send(res, 200, {
-      decision: verdict.decision,
-      reason_code: verdict.reason,
-      proof_tx: input.proof_tx,
-    });
+    send(res, 200, reply);
   });
 });
 

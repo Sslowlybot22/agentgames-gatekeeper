@@ -1,0 +1,12 @@
+import fs from "node:fs"; import { createRequire } from "node:module";
+const require=createRequire(import.meta.url);
+const snarkjs=require("snarkjs");
+const FIELD=21888242871839275222246405745257275088548364400416034343698204186575808495617n;
+const N=["registeredVkHash","proofVkHash","minimum","publicBalance","expiryBlock","currentBlock","recipient","conditionRecipient","amount","maxTransfer","decision","taskId"];
+const vals=["1234","1234","1000","1460","1000","900","5678","5678","500","1000","1","999"];
+const w=Object.fromEntries(N.map((n,i)=>[n,vals[i]]));
+w.salt="777";
+console.log("start witness calc");
+const t0=Date.now();
+await snarkjs.wtns.calculate(w,"circuits/gatekeeper.wasm","circuits/step1.wtns");
+console.log("witness ms",Date.now()-t0,"n",wtns.length);
