@@ -5,6 +5,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { prove } from "./gatekeeper.mjs";
+import * as kurier from "./kurier.mjs";
 
 const PORT = Number(process.env.PORT || 8787);
 const SECRET = process.env.AGENT_GAMES_HMAC_SECRET || "";
@@ -173,6 +174,19 @@ const server = http.createServer((req, res) => {
         reply.public_signals = ev.public_signals;
         stats.proofs = (stats.proofs || 0) + 1;
         logRec({ kind: "proof", ms: Date.now() - t0, signals: ev.public_signals.length });
+
+        // On-chain audit pointer, when a relay key is configured. Never fatal:
+        // the platform re-verifies the proof itself, so a relay outage must not
+        // cost the decision.
+        if (kurier.enabled()) {
+          try {
+            const fin = await kurier.finalize(ev, { budgetMs: 15_000 });
+            reply.proof_tx = fin.txHash;
+            logRec({ kind: "finalized", job: fin.jobId, tx: fin.txHash });
+          } catch (e) {
+            logRec({ kind: "finalize_fail", error: String(e.message || e).slice(0, 200) });
+          }
+        }
       } catch (e) {
         stats.proofFail = (stats.proofFail || 0) + 1;
         logRec({ kind: "proof_fail", error: String(e.message || e).slice(0, 300) });
